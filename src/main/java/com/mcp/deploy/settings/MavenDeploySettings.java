@@ -21,10 +21,6 @@ import java.util.Objects;
 public final class MavenDeploySettings implements PersistentStateComponent<MavenDeploySettings> {
 
     // ========== 全局设置 ==========
-    /** Jar 名称模式：auto=自动, manual=手动指定 */
-    public String jarNameMode = "auto";
-    /** 手动指定的 Jar 名称 */
-    public String jarNameManual = "app.jar";
     /** 全局连接超时（秒） */
     public int connectTimeout = 10;
     /** 是否总开关（控制整个插件） */
@@ -54,6 +50,11 @@ public final class MavenDeploySettings implements PersistentStateComponent<Maven
         public String keyPassphrase = "";
         /** 远程上传目录 */
         public String remoteDir = "/opt/app/";
+        /**
+         * 远端保存的文件名（可自定义/重命名）。
+         * 留空 = 沿用本地 jar 文件名；支持 ${jar} / ${name} / ${version} 占位符。
+         */
+        public String remoteFileName = "";
         /** 上传后执行的远程命令（可选） */
         public String remoteCommand = "";
         /** 是否启用自动上传 */
@@ -78,6 +79,7 @@ public final class MavenDeploySettings implements PersistentStateComponent<Maven
             c.privateKeyPath = this.privateKeyPath;
             c.keyPassphrase = this.keyPassphrase;
             c.remoteDir = this.remoteDir;
+            c.remoteFileName = this.remoteFileName;
             c.remoteCommand = this.remoteCommand;
             c.autoUpload = this.autoUpload;
             return c;

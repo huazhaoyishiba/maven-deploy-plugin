@@ -1,35 +1,53 @@
 <idea-plugin>
     <id>com.mcp.deploy</id>
     <name>Maven Deploy</name>
-    <vendor email="machuang@example.com" url="https://github.com/machuang">zhuyafei</vendor>
+    <vendor email="machuang@example.com" url="https://github.com/huazhaoyishiba/maven-deploy-plugin">zhuyafei</vendor>
 
     <description><![CDATA[
-    <h2>Maven 打包自动部署插件</h2>
-    <p>监听 Maven 打包完成事件，打包成功后自动通过 SSH 将 jar 文件上传到远程服务器。</p>
+    Maven Deploy is an IntelliJ IDEA plugin that automatically uploads JAR files to remote servers via SSH/SFTP after Maven build succeeds. Supports multiple server configurations with batch parallel upload, password and private key authentication, and remote command execution after deployment. Compatible with IntelliJ IDEA 2020.3 and above.
 
-    <h3>功能特性</h3>
+    <br/><br/>
+    <b>功能特性：</b>
     <ul>
-      <li>支持多服务器配置，每台独立开关</li>
-      <li>Maven 打包成功自动上传到所有已开启的服务器</li>
-      <li>右侧面板列表管理 + 新建/编辑表单双视图</li>
-      <li>手动勾选多台服务器一键上传</li>
-      <li>SSH 密码认证 + 密钥认证双模式</li>
-      <li>自动读取 jar 名称</li>
-      <li>上传后可执行远程命令（如重启服务）</li>
+      <li><b>只有 Maven 打包（package / install / deploy）成功后才会自动上传</b>，clean / compile / test 等其他目标不会触发</li>
+      <li>多服务器配置管理，每台独立开关</li>
+      <li>SSH 密码 + 私钥双重认证（支持 ed25519 / rsa-sha2）</li>
+      <li>多服务器并行上传，带进度条</li>
+      <li>上传失败自动重试，临时文件校验后原子替换，避免半个 jar 覆盖线上</li>
+      <li>可自定义上传后的远端文件名（固定名如 app.jar，或 ${name}/${version} 占位符）</li>
+      <li>上传后执行自定义远程命令（如重启服务）</li>
+      <li>右侧工具栏面板，列表管理 + 编辑表单双视图</li>
+      <li>兼容 IntelliJ IDEA 2020.3+</li>
     </ul>
 
-    <h3>使用方法</h3>
+    <b>使用方法：</b>
     <ol>
-      <li>右侧边栏打开 <b>Maven Deploy</b> 面板</li>
-      <li>点击 <b>新建</b>，填写服务器 SSH 信息</li>
-      <li>在列表中勾选「自动」列（或留空仅手动上传）</li>
-      <li>执行 Maven 打包 → 自动上传到所有勾选的服务器</li>
-      <li>或勾选列表行 → 点击「上传选中」手动触发</li>
+      <li>从右侧边栏打开 Maven Deploy 工具窗口</li>
+      <li>点击「新建」添加服务器配置（SSH 主机、端口、认证方式）</li>
+      <li>选择打包目标：插件固定取 target 下最新构建的可部署 jar，无需手动指定文件名</li>
+      <li>在列表中勾选「自动」列，设置哪些服务器需要自动部署</li>
+      <li>执行 Maven 打包（package / install / deploy），jar 文件将自动上传到已开启的服务器</li>
+      <li>也可以选中行后点击「上传选中」手动触发一次上传</li>
     </ol>
+
+    <b>自定义远端文件名：</b>编辑服务器配置 →「上传配置」→「远端文件名」。留空则沿用本地 jar 文件名；
+    可填固定名 <code>app.jar</code>，或使用占位符 <code>${jar}</code>（本地完整文件名）、
+    <code>${name}</code>（去掉版本号的名字）、<code>${version}</code>（版本号），例如
+    <code>${name}.jar</code>、<code>${name}-${version}.jar</code>。
+    <br/>
+
+    <b>注意（触发范围）：</b>插件监听的是 <b>IDEA 内的 Maven 运行配置</b>（Maven 工具窗口、Run/Debug Configurations、
+    Execute Maven Goal）。在 <b>Terminal 里直接执行 <code>mvn package</code> 不会触发自动上传</b>，
+    这种情况下请用面板上的「上传选中」手动上传。
+    <br/>
+    自动上传只在 <b>package / install / deploy</b> 成功后触发，clean / compile / test 等目标不会上传。
+
+    <b>排查提示：</b>上传结果和失败原因（认证失败 / 算法协商失败 / 权限不足 / 超时等）都会写入
+    <code>Help → Show Log in Explorer</code> 的 idea.log，可用 <code>MavenDeploy</code> / <code>SshUploader</code> 关键字搜索。
     ]]></description>
 
     <!-- 兼容版本范围 -->
-    <idea-version since-build="203" until-build="242.*"/>
+    <idea-version since-build="222" until-build="242.*"/>
 
     <!-- 依赖模块 -->
     <depends>com.intellij.modules.platform</depends>

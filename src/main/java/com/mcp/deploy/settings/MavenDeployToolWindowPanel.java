@@ -1,7 +1,9 @@
 package com.mcp.deploy.settings;
 
 import com.intellij.icons.AllIcons;
+import com.intellij.notification.Notification;
 import com.intellij.openapi.application.ApplicationManager;
+import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.fileChooser.FileChooserDescriptor;
 import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory;
 import com.intellij.openapi.project.Project;
@@ -10,6 +12,10 @@ import com.intellij.ui.JBColor;
 import com.intellij.ui.components.*;
 import com.intellij.ui.table.JBTable;
 import com.intellij.util.ui.JBUI;
+import com.mcp.deploy.notify.DeployNotification;
+import com.mcp.deploy.ssh.SshUploader;
+import com.mcp.deploy.util.JarResolver;
+import com.mcp.deploy.util.RemoteName;
 
 import javax.swing.*;
 import javax.swing.table.AbstractTableModel;
@@ -24,14 +30,21 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Maven Deploy 右侧面板 — 列表视图 + 编辑表单双模式。
  */
 public class MavenDeployToolWindowPanel extends JPanel {
 
+    private static final Logger LOG = Logger.getInstance(MavenDeployToolWindowPanel.class);
+
     private final Project project;
     private final MavenDeploySettings settings;
+
+    /** 手动上传进行中，避免重复点击并发上传。 */
+    private volatile boolean uploading = false;
 
     // ===== 卡片布局：列表 / 编辑表单 =====
     private final CardLayout cardLayout;
@@ -60,6 +73,7 @@ public class MavenDeployToolWindowPanel extends JPanel {
     private JBTextField editPrivateKeyField;
     private JBPasswordField editKeyPassphraseField;
     private JBTextField editRemoteDirField;
+    private JBTextField editRemoteFileNameField;
     private JBTextArea editRemoteCommandField;
     private JButton editSaveBtn;
     private JButton editCancelBtn;
@@ -115,14 +129,19 @@ public class MavenDeployToolWindowPanel extends JPanel {
         // 右侧：上传选中 + 启用开关
         JPanel headerRight = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
         globalEnabledCheckBox = new JBCheckBox("启用插件");
+        globalEnabledCheckBox.setSelected(settings.pluginEnabled);
+        // 只注册一次监听，旧实现在 showList() 里反复注册
+        globalEnabledCheckBox.addChangeListener(e ->
+            settings.pluginEnabled = globalEnabledCheckBox.isSelected());
         uploadSelectedBtn = new JButton("上传选中", AllIcons.Actions.Upload);
+        uploadSelectedBtn.setToolTipText("立即把当前 target 目录里的 jar 上传到选中的服务器");
         uploadSelectedBtn.addActionListener(e -> uploadSelected());
         headerRight.add(uploadSelectedBtn);
         headerRight.add(globalEnabledCheckBox);
         header.add(headerRight, BorderLayout.EAST);
         panel.add(header, BorderLayout.NORTH);
 
-        // --- 底部状态栏：文字 + 进度条 ---
+        // --- 底部状态栏：提示 + 状态文字 + 进度条 ---
         JPanel bottomBar = new JPanel(new BorderLayout(8, 0));
         bottomBar.setBorder(JBUI.Borders.empty(4, 0, 0, 0));
 
@@ -136,7 +155,20 @@ public class MavenDeployToolWindowPanel extends JPanel {
         progressBar.setPreferredSize(new Dimension(120, 14));
         bottomBar.add(progressBar, BorderLayout.EAST);
 
-        panel.add(bottomBar, BorderLayout.SOUTH);
+        JLabel hintLabel = new JLabel(
+            "自动上传仅在 Maven package / install / deploy 成功后触发");
+        hintLabel.setFont(hintLabel.getFont().deriveFont(11f));
+        hintLabel.setForeground(JBColor.GRAY);
+        hintLabel.setToolTipText(
+            "<html>只有 Maven package / install / deploy 成功后才会自动上传；"
+                + "<br>clean、compile、test 等目标不会触发。"
+                + "<br>只监听 IDEA 内的 Maven 运行配置（Maven 工具窗口 / Run 配置），"
+                + "<br>在 Terminal 里执行 mvn 不会触发，请用「上传选中」手动上传。</html>");
+
+        JPanel south = new JPanel(new BorderLayout());
+        south.add(hintLabel, BorderLayout.NORTH);
+        south.add(bottomBar, BorderLayout.CENTER);
+        panel.add(south, BorderLayout.SOUTH);
 
         // --- 中间：表格 ---
         tableModel = new ServerTableModel();
@@ -183,7 +215,6 @@ public class MavenDeployToolWindowPanel extends JPanel {
     // ==========================================
     //  编辑表单视图 — 仿 Kotlin UI DSL 布局
     // ==========================================
-
     private static final int FORM_H = 14;
     private static final int FORM_V = 12;
     /** 标签统一宽度，右对齐 */
@@ -263,6 +294,18 @@ public class MavenDeployToolWindowPanel extends JPanel {
         int ur = 0;
         editRemoteDirField = createTextField(20, "/opt/app/");
         addToForm(uploadContent, buildRow("远程目录:", editRemoteDirField), ur++, true);
+
+        editRemoteFileNameField = createTextField(20, "留空=本地 jar 名；如 app.jar、${name}.jar");
+        editRemoteFileNameField.setToolTipText(
+            "<html>上传到服务器时使用的文件名。留空则沿用本地 jar 文件名。<br>"
+                + "支持占位符：<br>"
+                + "&nbsp;&nbsp;${jar} → 本地完整文件名，如 demo-1.0.0.jar<br>"
+                + "&nbsp;&nbsp;${name} → 去掉版本号的名字，如 demo<br>"
+                + "&nbsp;&nbsp;${version} → 版本号，如 1.0.0<br>"
+                + "示例：<b>app.jar</b>（固定名，配合 systemctl restart app）、"
+                + "<b>${name}.jar</b>、<b>${name}-${version}.jar</b></html>");
+        addToForm(uploadContent, buildRow("远端文件名:", editRemoteFileNameField), ur++, true);
+
         editRemoteCommandField = new JBTextArea();
         editRemoteCommandField.setRows(3);
         editRemoteCommandField.setColumns(20);
@@ -430,8 +473,6 @@ public class MavenDeployToolWindowPanel extends JPanel {
     private void showList() {
         refreshTable();
         globalEnabledCheckBox.setSelected(settings.pluginEnabled);
-        globalEnabledCheckBox.addChangeListener(e ->
-            settings.pluginEnabled = globalEnabledCheckBox.isSelected());
         cardLayout.show(cardPanel, CARD_LIST);
     }
 
@@ -458,6 +499,7 @@ public class MavenDeployToolWindowPanel extends JPanel {
             editPrivateKeyField.setText(server.privateKeyPath);
             editKeyPassphraseField.setText(server.keyPassphrase);
             editRemoteDirField.setText(server.remoteDir);
+            editRemoteFileNameField.setText(server.remoteFileName);
             editRemoteCommandField.setText(server.remoteCommand);
         } else {
             // 新建空表单（保留上次的 global 设置）
@@ -469,6 +511,7 @@ public class MavenDeployToolWindowPanel extends JPanel {
             editPrivateKeyField.setText("");
             editKeyPassphraseField.setText("");
             editRemoteDirField.setText("/opt/app/");
+            editRemoteFileNameField.setText("");
             editRemoteCommandField.setText("");
         }
 
@@ -514,6 +557,14 @@ public class MavenDeployToolWindowPanel extends JPanel {
     }
 
     private void saveEditedServer() {
+        String remoteFileName = editRemoteFileNameField.getText().trim();
+        String nameError = RemoteName.checkTemplate(remoteFileName);
+        if (nameError != null) {
+            editStatusLabel.setText("远端文件名无效：" + nameError);
+            editStatusLabel.setForeground(JBColor.RED);
+            return;
+        }
+
         MavenDeploySettings.ServerConfig server;
         if (editingServerId != null) {
             server = settings.servers.stream()
@@ -538,6 +589,7 @@ public class MavenDeployToolWindowPanel extends JPanel {
         server.privateKeyPath = editPrivateKeyField.getText().trim();
         server.keyPassphrase = String.valueOf(editKeyPassphraseField.getPassword());
         server.remoteDir = editRemoteDirField.getText().trim();
+        server.remoteFileName = remoteFileName;
         server.remoteCommand = editRemoteCommandField.getText().trim();
 
         editStatusLabel.setText("已保存");
@@ -588,73 +640,129 @@ public class MavenDeployToolWindowPanel extends JPanel {
     }
 
     private void uploadSelected() {
+        if (uploading) {
+            statusLabel.setText("上一次上传还没结束，请稍候…");
+            statusLabel.setForeground(JBColor.GRAY);
+            return;
+        }
+
         int[] rows = serverTable.getSelectedRows();
         if (rows.length == 0) {
-            statusLabel.setText("请先勾选要上传的服务器");
+            statusLabel.setText("请先选中要上传的服务器");
+            statusLabel.setForeground(JBColor.RED);
             return;
         }
 
         String basePath = project.getBasePath();
         if (basePath == null) {
             statusLabel.setText("无法获取项目路径");
+            statusLabel.setForeground(JBColor.RED);
             return;
         }
 
-        Path jarPath = findLocalJar(basePath);
+        Path jarPath;
+        try {
+            jarPath = JarResolver.resolve(Paths.get(basePath), null);
+        } catch (Exception e) {
+            LOG.warn("查找 jar 失败", e);
+            jarPath = null;
+        }
         if (jarPath == null) {
-            statusLabel.setText("未找到 jar，请先 Maven 打包");
+            statusLabel.setText("未找到可上传的 jar，请先执行 Maven package / install / deploy");
+            statusLabel.setForeground(JBColor.RED);
             return;
         }
 
         List<MavenDeploySettings.ServerConfig> selected = new ArrayList<>();
         for (int row : rows) {
-            selected.add(settings.servers.get(row));
+            if (row >= 0 && row < settings.servers.size()) {
+                selected.add(settings.servers.get(row));
+            }
+        }
+        if (selected.isEmpty()) {
+            statusLabel.setText("请先选中要上传的服务器");
+            statusLabel.setForeground(JBColor.RED);
+            return;
         }
 
         int total = selected.size();
         String jarName = jarPath.getFileName().toString();
         statusLabel.setText("同时上传 " + jarName + " 到 " + total + " 台服务器...");
+        statusLabel.setForeground(JBColor.GRAY);
 
-        // 显示进度条
+        uploading = true;
+        uploadSelectedBtn.setEnabled(false);
         progressBar.setMaximum(total);
         progressBar.setValue(0);
         progressBar.setVisible(true);
 
-        java.util.concurrent.atomic.AtomicInteger completed = new java.util.concurrent.atomic.AtomicInteger(0);
-        java.util.concurrent.atomic.AtomicInteger success = new java.util.concurrent.atomic.AtomicInteger(0);
-        java.util.concurrent.atomic.AtomicInteger fail = new java.util.concurrent.atomic.AtomicInteger(0);
+        // 先弹出「开始上传」通知，避免用户不知道有没有在传
+        long jarSize = 0L;
+        try {
+            jarSize = Files.size(jarPath);
+        } catch (Exception ignored) {
+        }
+        List<String> labels = selected.stream()
+            .map(MavenDeploySettings.ServerConfig::getDisplayLabel)
+            .toList();
+        final Notification started = DeployNotification.showUploadStarted(project, jarName, jarSize, labels);
 
+        AtomicInteger completed = new AtomicInteger(0);
+        AtomicInteger success = new AtomicInteger(0);
+        AtomicInteger fail = new AtomicInteger(0);
+        CountDownLatch latch = new CountDownLatch(total);
+
+        final Path finalJar = jarPath;
         for (MavenDeploySettings.ServerConfig server : selected) {
-            new Thread(() -> {
+            Thread worker = new Thread(() -> {
                 try {
-                    com.mcp.deploy.ssh.SshUploader.uploadToServer(project, settings, server, jarPath);
-                    success.incrementAndGet();
-                } catch (Exception e) {
+                    if (SshUploader.upload(project, settings, finalJar, server)) {
+                        success.incrementAndGet();
+                    } else {
+                        fail.incrementAndGet();
+                    }
+                } catch (Throwable t) {
                     fail.incrementAndGet();
+                    LOG.error("上传到 " + server.getDisplayLabel() + " 异常", t);
                 } finally {
                     int done = completed.incrementAndGet();
                     ApplicationManager.getApplication().invokeLater(() -> progressBar.setValue(done));
+                    latch.countDown();
                 }
-            }, "maven-deploy-upload-" + server.getDisplayLabel()).start();
+            }, "maven-deploy-manual-upload-" + server.getDisplayLabel());
+            worker.setDaemon(true);
+            worker.start();
         }
 
-        // 等待全部完成
-        new Thread(() -> {
-            while (completed.get() < total) {
-                try { Thread.sleep(200); } catch (InterruptedException ignored) {}
+        Thread finisher = new Thread(() -> {
+            try {
+                latch.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
             }
-            int s = success.get(), f = fail.get();
+            int ok = success.get();
+            int failed = fail.get();
             ApplicationManager.getApplication().invokeLater(() -> {
+                uploading = false;
+                uploadSelectedBtn.setEnabled(true);
                 progressBar.setVisible(false);
-                if (f == 0) {
-                    statusLabel.setText("全部上传成功: " + s + " 台");
+                if (started != null) {
+                    try {
+                        started.expire();
+                    } catch (Exception ignored) {
+                    }
+                }
+                if (failed == 0) {
+                    statusLabel.setText("全部上传成功: " + ok + " 台");
                     statusLabel.setForeground(JBColor.GREEN);
                 } else {
-                    statusLabel.setText("⚠ 上传完成: " + s + " 成功, " + f + " 失败");
+                    statusLabel.setText("⚠ 上传完成: " + ok + " 成功, " + failed + " 失败（详情见通知/日志）");
                     statusLabel.setForeground(JBColor.ORANGE);
                 }
             });
-        }, "maven-deploy-multi-wait").start();
+        }, "maven-deploy-manual-upload-wait");
+        finisher.setDaemon(true);
+        finisher.start();
     }
 
     // ==========================================
@@ -692,7 +800,9 @@ public class MavenDeployToolWindowPanel extends JPanel {
                 case 0: return ""; // 选择列，空占位
                 case 1: return s.autoUpload;
                 case 2: return s.getDisplayLabel();
-                case 3: return s.user + "@" + s.host + ":" + s.port + " → " + s.remoteDir;
+                case 3: return s.user + "@" + s.host + ":" + s.port + " → " + s.remoteDir
+                    + (s.remoteFileName == null || s.remoteFileName.isBlank()
+                        ? "" : " [" + s.remoteFileName + "]");
                 default: return "";
             }
         }
@@ -730,40 +840,5 @@ public class MavenDeployToolWindowPanel extends JPanel {
             return label;
         }
     }
-
-    // ==========================================
-    //  查找 jar
-    // ==========================================
-
-    private Path findLocalJar(String basePath) {
-        Path targetDir = Paths.get(basePath, "target");
-        if (!Files.isDirectory(targetDir)) {
-            try {
-                return Files.walk(Paths.get(basePath), 4)
-                    .filter(p -> p.toString().endsWith(".jar")
-                        && !p.getFileName().toString().contains("-sources")
-                        && !p.getFileName().toString().contains("-javadoc")
-                        && p.getParent().getFileName().toString().equals("target"))
-                    .findFirst().orElse(null);
-            } catch (Exception e) { return null; }
-        }
-        try {
-            if ("auto".equals(settings.jarNameMode)) {
-                return Files.list(targetDir)
-                    .filter(p -> p.toString().endsWith(".jar")
-                        && !p.getFileName().toString().contains("-sources")
-                        && !p.getFileName().toString().contains("-javadoc"))
-                    .max((a, b) -> { try { return Long.compare(Files.size(a), Files.size(b)); } catch (Exception e) { return 0; } })
-                    .orElse(null);
-            } else {
-                Path p = targetDir.resolve(settings.jarNameManual);
-                if (Files.exists(p)) return p;
-                if (!settings.jarNameManual.endsWith(".jar")) {
-                    p = targetDir.resolve(settings.jarNameManual + ".jar");
-                    if (Files.exists(p)) return p;
-                }
-                return null;
-            }
-        } catch (Exception e) { return null; }
-    }
 }
+
