@@ -79,7 +79,9 @@ maven-deploy-plugin/
 │   │       ├── JarResolver.java            # 本地 jar 定位
 │   │       └── RemotePath.java             # 远端路径归一化
 │   └── resources/META-INF/
-│       └── plugin.xml                      # 插件描述与注册
+│       ├── plugin.xml                      # 插件描述与注册
+│       ├── pluginIcon.svg                  # 插件图标（亮色，40×40）
+│       └── pluginIcon_dark.svg             # 插件图标（暗色，40×40）
 ├── src/test/java/com/mcp/deploy/util/      # 纯 Java 单元测试
 └── gradle/wrapper/                         # Gradle Wrapper
 ```
