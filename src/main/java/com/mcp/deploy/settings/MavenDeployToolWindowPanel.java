@@ -2,12 +2,14 @@ package com.mcp.deploy.settings;
 
 import com.intellij.icons.AllIcons;
 import com.intellij.notification.Notification;
+import com.intellij.openapi.Disposable;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.fileChooser.FileChooserDescriptor;
 import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.Messages;
+import com.intellij.openapi.util.Disposer;
 import com.intellij.ui.JBColor;
 import com.intellij.ui.components.*;
 import com.intellij.ui.table.JBTable;
@@ -20,7 +22,6 @@ import com.mcp.deploy.util.RemoteName;
 import javax.swing.*;
 import javax.swing.table.AbstractTableModel;
 import javax.swing.table.DefaultTableCellRenderer;
-import javax.swing.table.TableColumn;
 import javax.swing.table.TableColumnModel;
 import java.awt.*;
 import java.awt.event.MouseAdapter;
@@ -29,7 +30,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -41,7 +44,8 @@ public class MavenDeployToolWindowPanel extends JPanel {
     private static final Logger LOG = Logger.getInstance(MavenDeployToolWindowPanel.class);
 
     private final Project project;
-    private final MavenDeploySettings settings;
+    private final GlobalDeploySettings globalSettings;
+    private MavenDeploySettings settings;
 
     /** 手动上传进行中，避免重复点击并发上传。 */
     private volatile boolean uploading = false;
@@ -78,12 +82,13 @@ public class MavenDeployToolWindowPanel extends JPanel {
     private JButton editSaveBtn;
     private JButton editCancelBtn;
     private JLabel editStatusLabel;
-    private String editingServerId = null; // null=新建, 非null=编辑
+    private MavenDeploySettings.ServerConfig editingServer;
 
-    public MavenDeployToolWindowPanel(Project project) {
+    public MavenDeployToolWindowPanel(Project project, Disposable lifetime) {
         super(new BorderLayout());
         this.project = project;
-        this.settings = MavenDeploySettings.getInstance(project);
+        this.globalSettings = GlobalDeploySettings.getInstance(project);
+        this.settings = globalSettings.snapshot();
 
         cardLayout = new CardLayout();
         cardPanel = new JPanel(cardLayout);
@@ -93,6 +98,10 @@ public class MavenDeployToolWindowPanel extends JPanel {
 
         add(cardPanel, BorderLayout.CENTER);
 
+        ApplicationManager.getApplication().getMessageBus().connect(lifetime)
+            .subscribe(GlobalDeploySettings.CHANGED, () -> SwingUtilities.invokeLater(() -> {
+                if (!Disposer.isDisposed(lifetime)) refreshTable();
+            }));
         showList();
     }
 
@@ -109,7 +118,7 @@ public class MavenDeployToolWindowPanel extends JPanel {
         header.setBorder(JBUI.Borders.emptyBottom(6));
 
         // 标题
-        JLabel title = new JLabel("服务器列表");
+        JLabel title = new JLabel("全局服务器");
         title.setFont(title.getFont().deriveFont(Font.BOLD, 13f));
         header.add(title, BorderLayout.WEST);
 
@@ -128,11 +137,10 @@ public class MavenDeployToolWindowPanel extends JPanel {
 
         // 右侧：上传选中 + 启用开关
         JPanel headerRight = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
-        globalEnabledCheckBox = new JBCheckBox("启用插件");
+        globalEnabledCheckBox = new JBCheckBox("全局启用");
         globalEnabledCheckBox.setSelected(settings.pluginEnabled);
-        // 只注册一次监听，旧实现在 showList() 里反复注册
-        globalEnabledCheckBox.addChangeListener(e ->
-            settings.pluginEnabled = globalEnabledCheckBox.isSelected());
+        globalEnabledCheckBox.addActionListener(e ->
+            globalSettings.setPluginEnabled(globalEnabledCheckBox.isSelected()));
         uploadSelectedBtn = new JButton("上传选中", AllIcons.Actions.Upload);
         uploadSelectedBtn.setToolTipText("立即把当前 target 目录里的 jar 上传到选中的服务器");
         uploadSelectedBtn.addActionListener(e -> uploadSelected());
@@ -156,7 +164,7 @@ public class MavenDeployToolWindowPanel extends JPanel {
         bottomBar.add(progressBar, BorderLayout.EAST);
 
         JLabel hintLabel = new JLabel(
-            "自动上传仅在 Maven package / install / deploy 成功后触发");
+            "所有项目共用自动上传目标，Maven package / install / deploy 成功后触发");
         hintLabel.setFont(hintLabel.getFont().deriveFont(11f));
         hintLabel.setForeground(JBColor.GRAY);
         hintLabel.setToolTipText(
@@ -198,7 +206,7 @@ public class MavenDeployToolWindowPanel extends JPanel {
                 if (e.getClickCount() == 2) {
                     int row = serverTable.rowAtPoint(e.getPoint());
                     if (row >= 0 && row < settings.servers.size()) {
-                        openEditForm(settings.servers.get(row).id);
+                        openEditForm(settings.servers.get(row));
                     }
                 }
             }
@@ -229,7 +237,7 @@ public class MavenDeployToolWindowPanel extends JPanel {
             JBUI.Borders.empty(10, FORM_H, 8, FORM_H),
             JBUI.Borders.customLine(JBColor.border(), 0, 0, 1, 0)
         ));
-        JLabel formTitle = new JLabel(editingServerId == null ? "新建服务器" : "编辑服务器");
+        JLabel formTitle = new JLabel("新建全局服务器");
         formTitle.setFont(formTitle.getFont().deriveFont(Font.BOLD, 13f));
         titleBar.add(formTitle, BorderLayout.WEST);
         this.formTitleLabel = formTitle;
@@ -471,25 +479,16 @@ public class MavenDeployToolWindowPanel extends JPanel {
     // ==========================================
 
     private void showList() {
+        editingServer = null;
         refreshTable();
-        globalEnabledCheckBox.setSelected(settings.pluginEnabled);
         cardLayout.show(cardPanel, CARD_LIST);
     }
 
-    private void openEditForm(String serverId) {
-        this.editingServerId = serverId;
+    private void openEditForm(MavenDeploySettings.ServerConfig server) {
+        editingServer = server;
+        formTitleLabel.setText(server == null ? "新建全局服务器" : "编辑全局服务器");
 
-        // 动态更新标题
-        if (formTitleLabel != null) {
-            formTitleLabel.setText(serverId == null ? "新建服务器" : "编辑服务器");
-        }
-
-        MavenDeploySettings.ServerConfig server;
-
-        if (serverId != null) {
-            server = settings.servers.stream()
-                .filter(s -> s.id.equals(serverId))
-                .findFirst().orElse(new MavenDeploySettings.ServerConfig());
+        if (server != null) {
             // 填充已有值
             editNameField.setText(server.name);
             editHostField.setText(server.host);
@@ -540,9 +539,10 @@ public class MavenDeployToolWindowPanel extends JPanel {
         editStatusLabel.setText("正在测试连接...");
         editStatusLabel.setForeground(JBColor.GRAY);
 
+        int timeout = settings.connectTimeout;
         new Thread(() -> {
             try {
-                String result = com.mcp.deploy.ssh.SshUploader.testConnection(tmp, settings.connectTimeout);
+                String result = SshUploader.testConnection(tmp, timeout);
                 ApplicationManager.getApplication().invokeLater(() -> {
                     editStatusLabel.setText(result);
                     editStatusLabel.setForeground(JBColor.GREEN);
@@ -565,21 +565,8 @@ public class MavenDeployToolWindowPanel extends JPanel {
             return;
         }
 
-        MavenDeploySettings.ServerConfig server;
-        if (editingServerId != null) {
-            server = settings.servers.stream()
-                .filter(s -> s.id.equals(editingServerId))
-                .findFirst().orElse(null);
-            if (server == null) {
-                editStatusLabel.setText("服务器配置不存在");
-                editStatusLabel.setForeground(JBColor.RED);
-                return;
-            }
-        } else {
-            server = new MavenDeploySettings.ServerConfig();
-            settings.servers.add(server);
-        }
-
+        MavenDeploySettings.ServerConfig server = editingServer == null
+            ? new MavenDeploySettings.ServerConfig() : editingServer.copy();
         server.name = editNameField.getText().trim();
         server.host = editHostField.getText().trim();
         try { server.port = Integer.parseInt(editPortField.getText().trim()); }
@@ -592,14 +579,14 @@ public class MavenDeployToolWindowPanel extends JPanel {
         server.remoteFileName = remoteFileName;
         server.remoteCommand = editRemoteCommandField.getText().trim();
 
-        editStatusLabel.setText("已保存");
-        editStatusLabel.setForeground(JBColor.GREEN);
-
-        // 延迟回到列表
-        new Thread(() -> {
-            try { Thread.sleep(600); } catch (InterruptedException ignored) {}
-            ApplicationManager.getApplication().invokeLater(this::showList);
-        }).start();
+        if (!globalSettings.saveServer(server, editingServer)) {
+            editStatusLabel.setText("服务器配置已变更，请返回列表重新打开后保存");
+            editStatusLabel.setForeground(JBColor.RED);
+            return;
+        }
+        showList();
+        statusLabel.setText("已保存全局服务器配置");
+        statusLabel.setForeground(JBColor.GREEN);
     }
 
     // ==========================================
@@ -612,7 +599,7 @@ public class MavenDeployToolWindowPanel extends JPanel {
             statusLabel.setText("请先选中一行");
             return;
         }
-        openEditForm(settings.servers.get(row).id);
+        openEditForm(settings.servers.get(row));
     }
 
     private void deleteSelected() {
@@ -621,21 +608,19 @@ public class MavenDeployToolWindowPanel extends JPanel {
             statusLabel.setText("请先选中要删除的行");
             return;
         }
+        List<String> ids = new ArrayList<>(rows.length);
+        for (int row : rows) {
+            ids.add(settings.servers.get(row).id);
+        }
         int result = Messages.showYesNoDialog(
             project,
-            "确定删除选中的 " + rows.length + " 个服务器配置？",
+            "从所有项目中删除选中的 " + ids.size() + " 个服务器配置？",
             "确认删除",
             Messages.getQuestionIcon()
         );
         if (result == Messages.YES) {
-            // 从后往前删，避免索引变化
-            List<MavenDeploySettings.ServerConfig> toRemove = new ArrayList<>();
-            for (int i = rows.length - 1; i >= 0; i--) {
-                toRemove.add(settings.servers.get(rows[i]));
-            }
-            settings.servers.removeAll(toRemove);
-            refreshTable();
-            statusLabel.setText("已删除 " + rows.length + " 项");
+            globalSettings.removeServers(ids);
+            statusLabel.setText("已删除选中的全局服务器");
         }
     }
 
@@ -673,10 +658,11 @@ public class MavenDeployToolWindowPanel extends JPanel {
             return;
         }
 
+        MavenDeploySettings uploadSettings = settings;
         List<MavenDeploySettings.ServerConfig> selected = new ArrayList<>();
         for (int row : rows) {
-            if (row >= 0 && row < settings.servers.size()) {
-                selected.add(settings.servers.get(row));
+            if (row >= 0 && row < uploadSettings.servers.size()) {
+                selected.add(uploadSettings.servers.get(row));
             }
         }
         if (selected.isEmpty()) {
@@ -716,7 +702,7 @@ public class MavenDeployToolWindowPanel extends JPanel {
         for (MavenDeploySettings.ServerConfig server : selected) {
             Thread worker = new Thread(() -> {
                 try {
-                    if (SshUploader.upload(project, settings, finalJar, server)) {
+                    if (SshUploader.upload(project, uploadSettings, finalJar, server)) {
                         success.incrementAndGet();
                     } else {
                         fail.incrementAndGet();
@@ -770,8 +756,19 @@ public class MavenDeployToolWindowPanel extends JPanel {
     // ==========================================
 
     private void refreshTable() {
+        Set<String> selectedIds = new HashSet<>();
+        for (int row : serverTable.getSelectedRows()) {
+            selectedIds.add(settings.servers.get(row).id);
+        }
+        if (serverTable.isEditing()) serverTable.removeEditor();
+        settings = globalSettings.snapshot();
+        globalEnabledCheckBox.setSelected(settings.pluginEnabled);
         tableModel.fireTableDataChanged();
-        serverTable.clearSelection();
+        for (int row = 0; row < settings.servers.size(); row++) {
+            if (selectedIds.contains(settings.servers.get(row).id)) {
+                serverTable.addRowSelectionInterval(row, row);
+            }
+        }
     }
 
     private class ServerTableModel extends AbstractTableModel {
@@ -810,8 +807,7 @@ public class MavenDeployToolWindowPanel extends JPanel {
         @Override
         public void setValueAt(Object value, int row, int col) {
             if (col == 1 && value instanceof Boolean) {
-                settings.servers.get(row).autoUpload = (Boolean) value;
-                fireTableCellUpdated(row, col);
+                globalSettings.setAutoUpload(settings.servers.get(row).id, (Boolean) value);
             }
         }
     }

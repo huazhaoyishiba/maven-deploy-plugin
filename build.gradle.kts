@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "com.mcp.deploy"
-version = "1.1.0"
+version = "1.2.0"
 
 repositories {
     mavenCentral()
@@ -42,6 +42,10 @@ tasks {
         sinceBuild.set("222")
         untilBuild.set("242.*")
         changeNotes.set("""
+        <h3>v1.2.0</h3>
+        <ul>
+          <li>服务器列表、启用插件和自动上传开关由当前 IDEA 的所有项目共享。首次使用时可自动沿用旧项目配置。</li>
+        </ul>
         <h3>v1.1.0</h3>
         <ul>
           <li>修复：多目标运行（如 clean package）不再漏传，只有在 package/install/deploy 成功后才自动上传</li>
@@ -51,7 +55,7 @@ tasks {
           <li>改进：上传失败自动重试、临时文件校验 + 原子替换，避免半个 jar 覆盖线上</li>
           <li>改进：错误原因可读化（认证失败/算法协商失败/权限不足/超时等）</li>
           <li>改进：JSch 升级到 mwiede 0.2.26，支持 ed25519 与 rsa-sha2</li>
-          <li>新增：可自定义上传后的远端文件名（固定名或 ${jar}/${name}/${version} 占位符）</li>
+          <li>新增：可自定义上传后的远端文件名（固定名或 ${'$'}{jar}/${'$'}{name}/${'$'}{version} 占位符）</li>
           <li>新增：开始上传时先弹通知（jar/大小/目标服务器），结束后收起并汇总结果</li>
           <li>变更：去掉「手动指定 jar 名称」，固定上传 target 下最新构建的可部署 jar</li>
           <li>改进：找不到 jar 时的提示会列出实际存在的候选 jar，并区分「远端文件名」与「选哪个 jar」</li>

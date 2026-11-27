@@ -1,7 +1,6 @@
 package com.mcp.deploy.settings;
 
 import com.intellij.openapi.components.*;
-import com.intellij.openapi.project.Project;
 import com.intellij.util.xmlb.XmlSerializerUtil;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
@@ -9,10 +8,10 @@ import org.jetbrains.annotations.Nullable;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.UUID;
 
 /**
- * 插件配置持久化存储。
- * 支持多个服务器配置，每项独立开关。
+ * 全局设置的数据格式，也用来读取旧版本按项目保存的配置。
  */
 @State(
     name = "MavenDeploySettings",
@@ -25,6 +24,8 @@ public final class MavenDeploySettings implements PersistentStateComponent<Maven
     public int connectTimeout = 10;
     /** 是否总开关（控制整个插件） */
     public boolean pluginEnabled = true;
+    /** 全局配置已被编辑或已从旧项目导入，包括用户清空了服务器列表的情况。 */
+    public boolean initialized;
 
     // ========== 服务器配置列表 ==========
     public List<ServerConfig> servers = new ArrayList<>();
@@ -61,7 +62,7 @@ public final class MavenDeploySettings implements PersistentStateComponent<Maven
         public boolean autoUpload = true;
 
         public ServerConfig() {
-            this.id = String.valueOf(System.currentTimeMillis());
+            this(UUID.randomUUID().toString());
         }
 
         public ServerConfig(String id) {
@@ -83,6 +84,19 @@ public final class MavenDeploySettings implements PersistentStateComponent<Maven
             c.remoteCommand = this.remoteCommand;
             c.autoUpload = this.autoUpload;
             return c;
+        }
+
+        boolean hasSameFormValues(ServerConfig other) {
+            return port == other.port
+                && Objects.equals(name, other.name)
+                && Objects.equals(host, other.host)
+                && Objects.equals(user, other.user)
+                && Objects.equals(password, other.password)
+                && Objects.equals(privateKeyPath, other.privateKeyPath)
+                && Objects.equals(keyPassphrase, other.keyPassphrase)
+                && Objects.equals(remoteDir, other.remoteDir)
+                && Objects.equals(remoteFileName, other.remoteFileName)
+                && Objects.equals(remoteCommand, other.remoteCommand);
         }
 
         @Override
@@ -147,7 +161,16 @@ public final class MavenDeploySettings implements PersistentStateComponent<Maven
         }
     }
 
-    // ========== Singleton ==========
+    MavenDeploySettings copy() {
+        MavenDeploySettings copy = new MavenDeploySettings();
+        copy.connectTimeout = connectTimeout;
+        copy.pluginEnabled = pluginEnabled;
+        copy.initialized = initialized;
+        for (ServerConfig server : servers) {
+            copy.servers.add(server.copy());
+        }
+        return copy;
+    }
 
     @Nullable
     @Override
@@ -161,7 +184,4 @@ public final class MavenDeploySettings implements PersistentStateComponent<Maven
         migrateIfNeeded();
     }
 
-    public static MavenDeploySettings getInstance(@NotNull Project project) {
-        return project.getService(MavenDeploySettings.class);
-    }
 }

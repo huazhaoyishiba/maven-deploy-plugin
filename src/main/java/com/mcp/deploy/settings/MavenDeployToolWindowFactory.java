@@ -1,6 +1,8 @@
 package com.mcp.deploy.settings;
 
+import com.intellij.openapi.Disposable;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.util.Disposer;
 import com.intellij.openapi.wm.ToolWindow;
 import com.intellij.openapi.wm.ToolWindowFactory;
 import com.intellij.ui.content.Content;
@@ -14,8 +16,10 @@ public class MavenDeployToolWindowFactory implements ToolWindowFactory {
 
     @Override
     public void createToolWindowContent(@NotNull Project project, @NotNull ToolWindow toolWindow) {
-        MavenDeployToolWindowPanel panel = new MavenDeployToolWindowPanel(project);
+        Disposable lifetime = Disposer.newDisposable();
+        MavenDeployToolWindowPanel panel = new MavenDeployToolWindowPanel(project, lifetime);
         Content content = ContentFactory.getInstance().createContent(panel, "", false);
+        content.setDisposer(lifetime);
         toolWindow.getContentManager().addContent(content);
     }
 }

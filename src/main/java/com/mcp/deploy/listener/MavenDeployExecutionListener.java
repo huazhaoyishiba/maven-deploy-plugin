@@ -9,6 +9,7 @@ import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.project.Project;
 import com.mcp.deploy.notify.DeployNotification;
+import com.mcp.deploy.settings.GlobalDeploySettings;
 import com.mcp.deploy.settings.MavenDeploySettings;
 import com.mcp.deploy.ssh.SshUploader;
 import com.mcp.deploy.util.JarResolver;
@@ -68,9 +69,6 @@ public class MavenDeployExecutionListener implements ExecutionListener {
         String typeId = runConfig.getType().getId();
         if (typeId == null || !typeId.toLowerCase(Locale.ROOT).contains("maven")) return;
 
-        MavenDeploySettings settings = MavenDeploySettings.getInstance(project);
-        if (settings == null || !settings.pluginEnabled) return;
-
         String configName = runConfig.getName();
         List<String> goals = goalsOf(runConfig);
 
@@ -94,13 +92,19 @@ public class MavenDeployExecutionListener implements ExecutionListener {
             return;
         }
 
+        MavenDeploySettings settings = GlobalDeploySettings.getInstance(project).snapshot();
+        if (!settings.pluginEnabled) return;
+        List<MavenDeploySettings.ServerConfig> targets = settings.servers.stream()
+            .filter(server -> server.autoUpload).toList();
+        if (targets.isEmpty()) return;
+
         String hitGoal = goals.isEmpty()
             ? String.valueOf(MavenGoalParser.nameSuggestsPackaging(configName))
             : String.valueOf(MavenGoalParser.packagingGoal(goals));
         LOG.info("检测到 Maven 打包完成: config=" + configName
             + ", goals=" + goals + ", 命中打包目标=" + hitGoal + ", exitCode=0");
 
-        handleBuildSuccess(project, settings, runConfig);
+        handleBuildSuccess(project, settings, runConfig, targets);
     }
 
     // =============================================
@@ -108,7 +112,7 @@ public class MavenDeployExecutionListener implements ExecutionListener {
     // =============================================
 
     private void handleBuildSuccess(Project project, MavenDeploySettings settings,
-                                    RunConfiguration runConfig) {
+                                    RunConfiguration runConfig, List<MavenDeploySettings.ServerConfig> targets) {
         String basePath = project.getBasePath();
         if (basePath == null) {
             LOG.warn("无法获取项目根目录，跳过自动上传");
@@ -130,15 +134,6 @@ public class MavenDeployExecutionListener implements ExecutionListener {
             String detail = buildJarNotFoundDetail(projectBase, moduleDir);
             LOG.warn("已打包成功，但没找到可上传的 jar。" + detail);
             notifyWarning(project, "Maven 部署未执行", detail);
-            return;
-        }
-
-        List<MavenDeploySettings.ServerConfig> targets = settings.servers == null
-            ? List.of()
-            : settings.servers.stream().filter(s -> s.autoUpload).toList();
-
-        if (targets.isEmpty()) {
-            LOG.info("没有启用自动上传的服务器，跳过上传。jar=" + jarPath);
             return;
         }
 

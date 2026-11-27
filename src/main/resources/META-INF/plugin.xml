@@ -10,7 +10,7 @@
     <b>功能特性：</b>
     <ul>
       <li><b>只有 Maven 打包（package / install / deploy）成功后才会自动上传</b>，clean / compile / test 等其他目标不会触发</li>
-      <li>多服务器配置管理，每台独立开关</li>
+      <li>同一 IDEA 中的所有项目共享服务器列表、插件总开关和每台服务器的自动上传开关</li>
       <li>SSH 密码 + 私钥双重认证（支持 ed25519 / rsa-sha2）</li>
       <li>多服务器并行上传，带进度条</li>
       <li>上传失败自动重试，临时文件校验后原子替换，避免半个 jar 覆盖线上</li>
@@ -23,10 +23,10 @@
     <b>使用方法：</b>
     <ol>
       <li>从右侧边栏打开 Maven Deploy 工具窗口</li>
-      <li>点击「新建」添加服务器配置（SSH 主机、端口、认证方式）</li>
+      <li>点击「新建」添加服务器配置（SSH 主机、端口、认证方式）。在其他项目也可使用这些配置</li>
       <li>选择打包目标：插件固定取 target 下最新构建的可部署 jar，无需手动指定文件名</li>
       <li>在列表中勾选「自动」列，设置哪些服务器需要自动部署</li>
-      <li>执行 Maven 打包（package / install / deploy），jar 文件将自动上传到已开启的服务器</li>
+      <li>在任意项目执行 Maven 打包（package / install / deploy），当前项目的 jar 将自动上传到已开启的服务器</li>
       <li>也可以选中行后点击「上传选中」手动触发一次上传</li>
     </ol>
 
@@ -62,9 +62,11 @@
             icon="AllIcons.Toolwindows.ToolWindowCommit"
             factoryClass="com.mcp.deploy.settings.MavenDeployToolWindowFactory"/>
 
-        <!-- 持久化服务 -->
+        <!-- 旧项目配置供首次升级导入 -->
         <projectService
             serviceImplementation="com.mcp.deploy.settings.MavenDeploySettings"/>
+        <applicationService
+            serviceImplementation="com.mcp.deploy.settings.GlobalDeploySettings"/>
 
         <!-- 通知组 -->
         <notificationGroup id="Maven Deploy"
